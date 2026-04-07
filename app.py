@@ -99,7 +99,13 @@ def process_video(video_path, progress_bar, status_text):
     # Step 7: Team assignment
     status_text.text("👕 Assigning teams by jersey color...")
     team_assigner = TeamAssigner()
-    team_assigner.assign_team_color(video_frames[0], tracks['players'][0])
+    # Find the first frame that actually has player detections
+    first_frame_with_players = 0
+    for i, player_track in enumerate(tracks['players']):
+        if len(player_track) >= 2:  # Need at least 2 players for KMeans(n_clusters=2)
+            first_frame_with_players = i
+            break
+    team_assigner.assign_team_color(video_frames[first_frame_with_players], tracks['players'][first_frame_with_players])
 
     for frame_num, player_track in enumerate(tracks['players']):
         for player_id, track in player_track.items():
