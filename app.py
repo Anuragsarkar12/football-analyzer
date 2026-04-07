@@ -44,18 +44,19 @@ def load_tracker(model_path='models/best.pt'):
 
 def process_video(video_path, progress_bar, status_text):
     """Run the full analysis pipeline on an uploaded video."""
+    import gc
 
-    # Step 1: Read video
+    # Step 1: Read video — cap at 150 frames on cloud to avoid OOM
     status_text.text("📖 Reading video frames...")
     progress_bar.progress(5)
-    video_frames = read_video(video_path)
+    video_frames = read_video(video_path, max_frames=150)
     total_frames = len(video_frames)
 
     if total_frames == 0:
         st.error("Could not read any frames from the video. Check the format.")
         return None
 
-    st.info(f"Loaded {total_frames} frames from video.")
+    st.info(f"Processing {total_frames} frames (capped at 150 to fit memory limits).")
 
     # Step 2: Object detection & tracking
     status_text.text("🔍 Running YOLO detection & tracking (this is the slow part)...")
@@ -63,6 +64,7 @@ def process_video(video_path, progress_bar, status_text):
     tracker = load_tracker()
     tracks = tracker.get_object_tracks(video_frames, read_from_stub=False)
     tracker.add_position_to_tracks(tracks)
+    gc.collect()
 
     progress_bar.progress(40)
 
@@ -133,20 +135,89 @@ def process_video(video_path, progress_bar, status_text):
 
     progress_bar.progress(85)
 
-    # Step 9: Draw annotations
-    status_text.text("🎨 Drawing annotations on frames...")
-    output_frames = tracker.draw_annotations(video_frames, tracks, team_ball_control)
-    output_frames = camera_movement_estimator.draw_camera_movement(
-        output_frames, camera_movement_per_frame
-    )
-    speed_distance_estimator.draw_speed_and_distance(output_frames, tracks)
+    # Step 9: Draw annotations — write directly to video file to save RAM
+    status_text.text("🎨 Drawing annotations and encoding video...")
+    output_path = tempfile.mktemp(suffix='.mp4')
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    h, w = video_frames[0].shape[:2]
+    out = cv2.VideoWriter(output_path, fourcc, 24, (w, h))
+
+    for frame_num, frame in enumerate(video_frames):
+        frame = frame.copy()
+
+        # Draw player/referee/ball annotations
+        player_dict = tracks["players"][frame_num]
+        ball_dict = tracks["ball"][frame_num]
+        referee_dict = tracks["referees"][frame_num]
+
+        for track_id, player in player_dict.items():
+            color = player.get("team_color", (0, 0, 255))
+            frame = tracker.draw_ellipse(frame, player["bbox"], color, track_id)
+            if player.get('has_ball', False):
+                frame = tracker.draw_traingle(frame, player["bbox"], (0, 0, 255))
+
+        for _, referee in referee_dict.items():
+            frame = tracker.draw_ellipse(frame, referee["bbox"], (0, 255, 255))
+
+        for track_id, ball in ball_dict.items():
+            frame = tracker.draw_traingle(frame, ball["bbox"], (0, 255, 0))
+
+        frame = tracker.draw_team_ball_control(frame, frame_num, team_ball_control)
+
+        # Draw camera movement overlay
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (500, 100), (255, 255, 255), -1)
+        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        x_mov, y_mov = camera_movement_per_frame[frame_num]
+        cv2.putText(frame, f"Camera Movement X: {x_mov:.2f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
+        cv2.putText(frame, f"Camera Movement Y: {y_mov:.2f}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
+
+        # Draw speed/distance
+        for obj_name, object_tracks in tracks.items():
+            if obj_name == "ball" or obj_name == "referees":
+                continue
+            for _, track_info in object_tracks[frame_num].items():
+                if "speed" in track_info:
+                    speed = track_info.get('speed')
+                    distance = track_info.get('distance')
+                    if speed is None or distance is None:
+                        continue
+                    bbox = track_info['bbox']
+                    from utils import get_foot_position
+                    position = list(get_foot_position(bbox))
+                    position[1] += 40
+                    position = tuple(map(int, position))
+                    cv2.putText(frame, f"{speed:.2f} km/h", position,
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                    cv2.putText(frame, f"{distance:.2f} m",
+                                (position[0], position[1] + 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+
+        # Write frame directly to disk instead of keeping in RAM
+        out.write(frame)
+
+    out.release()
+    del video_frames
+    gc.collect()
 
     progress_bar.progress(95)
 
-    # Step 10: Encode output video
-    status_text.text("💾 Encoding output video (H.264 MP4)...")
-    output_path = tempfile.mktemp(suffix='.mp4')
-    save_video_mp4(output_frames, output_path)
+    # Step 10: Re-encode for browser compatibility
+    status_text.text("💾 Re-encoding video for browser playback...")
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        final_path = output_path.replace('.mp4', '_final.mp4')
+        os.system(
+            f'{ffmpeg_path} -y -i {output_path} -c:v libx264 -preset fast '
+            f'-crf 23 -movflags +faststart {final_path} 2>/dev/null'
+        )
+        if os.path.exists(final_path):
+            os.replace(final_path, output_path)
+    except Exception:
+        pass
 
     progress_bar.progress(100)
     status_text.text("✅ Processing complete!")
