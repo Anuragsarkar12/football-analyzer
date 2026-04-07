@@ -22,15 +22,19 @@ def save_video_mp4(frames, output_path, fps=24):
         out.write(frame)
     out.release()
 
-    # Re-encode with ffmpeg for browser compatibility (mp4v isn't universally supported)
-    final_path = output_path.replace('.mp4', '_final.mp4')
-    os.system(
-        f'ffmpeg -y -i {output_path} -c:v libx264 -preset fast '
-        f'-crf 23 -movflags +faststart {final_path} 2>/dev/null'
-    )
-    if os.path.exists(final_path):
-        os.replace(final_path, output_path)
-
+    # Re-encode with ffmpeg for browser compatibility
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        final_path = output_path.replace('.mp4', '_final.mp4')
+        os.system(
+            f'{ffmpeg_path} -y -i {output_path} -c:v libx264 -preset fast '
+            f'-crf 23 -movflags +faststart {final_path} 2>/dev/null'
+        )
+        if os.path.exists(final_path):
+            os.replace(final_path, output_path)
+    except Exception:
+        pass  # Fall back to mp4v if ffmpeg unavailable
 
 @st.cache_resource
 def load_tracker(model_path='models/best.pt'):
