@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+stubs/
+input_video/
+output_videos/
+final_mp4_video/
+.DS_Store
+*.avi
+venv/
+.env
